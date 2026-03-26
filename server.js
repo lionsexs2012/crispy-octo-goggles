@@ -56,7 +56,7 @@ let activeUsers = {};
 
 function broadcast(data) {
     for (let user in activeUsers) {
-        if (activeUsers[user].readyState === WebSocket.OPEN) {
+        if (activeUsers[user] && activeUsers[user].readyState === WebSocket.OPEN) {
             try { activeUsers[user].send(JSON.stringify(data)); } catch(e) {}
         }
     }
@@ -481,7 +481,7 @@ const HTML_PAGE = `<!DOCTYPE html>
     const saved = localStorage.getItem('username');
     if (saved) usernameInput.value = saved;
     
-    // ========== LOGIN ==========
+    // LOGIN FUNCTION
     function login() {
         const name = usernameInput.value.trim();
         if (!name) { alert('Enter your name'); return; }
@@ -493,7 +493,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         connect();
     }
     
-    // ========== WEBSOCKET ==========
+    // CONNECT WEBSOCKET
     function connect() {
         const wsUrl = WS_URL + '?username=' + encodeURIComponent(currentUser);
         if (ws) try { ws.close(); } catch(e) {}
@@ -728,7 +728,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         });
     }
     
-    // ========== EVENT LISTENERS (ГАРАНТИРОВАННО РАБОТАЮТ) ==========
+    // ========== EVENT LISTENERS ==========
     joinButton.onclick = login;
     sendBtn.onclick = sendMessage;
     fileBtn.onclick = function() { fileInput.click(); };

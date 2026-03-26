@@ -192,117 +192,192 @@ const HTML_PAGE = `<!DOCTYPE html>
 <body>
 <div class="login-screen" id="loginScreen">
     <div class="login-card">
-        <h2>💬 Simple Messenger</h2>
-        <p>Введи имя чтобы начать общение</p>
-        <input type="text" id="usernameInput" placeholder="Твое имя" maxlength="24">
-        <button onclick="login()">Войти</button>
+        <h2>Simple Messenger</h2>
+        <p>Enter your name to start</p>
+        <input type="text" id="usernameInput" placeholder="Your name" maxlength="24">
+        <button onclick="login()">Join</button>
     </div>
 </div>
 <div class="chat-container" id="chatContainer">
     <div class="chat-header">
-        <h2>💬 Simple Messenger</h2>
-        <div class="online-badge" id="onlineCount">👥 0</div>
+        <h2>Simple Messenger</h2>
+        <div class="online-badge" id="onlineCount">0 online</div>
         <button style="background:none; border:none; color:#8e9eae; font-size:20px;" onclick="toggleUsersPanel()">☰</button>
     </div>
-    <div class="connection-status" id="connStatus">🟡 Подключение...</div>
+    <div class="connection-status" id="connStatus">Connecting...</div>
     <div class="messages-area" id="messagesArea"></div>
     <div class="input-area">
-        <input type="text" id="messageInput" placeholder="Сообщение..." onkeypress="handleKeyPress(event)">
-        <button onclick="sendMessage()">➤</button>
+        <input type="text" id="messageInput" placeholder="Message..." onkeypress="handleKeyPress(event)">
+        <button onclick="sendMessage()">Send</button>
     </div>
 </div>
 <div class="overlay" id="overlay" onclick="toggleUsersPanel()"></div>
 <div class="users-panel" id="usersPanel">
     <div class="users-panel-header">
-        <h3>👥 Онлайн</h3>
+        <h3>Online</h3>
         <button onclick="toggleUsersPanel()">✕</button>
     </div>
-    <div class="users-list" id="usersListPanel">Загрузка...</div>
+    <div class="users-list" id="usersListPanel">Loading...</div>
 </div>
 <script>
-    let ws = null, currentUser = '', reconnectAttempts = 0, reconnectTimeout = null, pingInterval = null;
-    const messagesArea = document.getElementById('messagesArea');
-    const messageInput = document.getElementById('messageInput');
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const WS_URL = `${protocol}//${window.location.host}`;
-    const savedName = localStorage.getItem('messengerUsername');
-    if (savedName) document.getElementById('usernameInput').value = savedName;
-    function login() {
-        let name = document.getElementById('usernameInput').value.trim();
-        if (!name) { alert('Введите имя'); return; }
-        if (name.length < 2) { alert('Имя минимум 2 символа'); return; }
-        currentUser = name;
-        localStorage.setItem('messengerUsername', name);
-        document.getElementById('loginScreen').style.display = 'none';
-        document.getElementById('chatContainer').style.display = 'flex';
-        connectWebSocket();
-        setTimeout(() => messageInput.focus(), 300);
+    var ws = null;
+    var currentUser = "";
+    var reconnectAttempts = 0;
+    var reconnectTimeout = null;
+    var pingInterval = null;
+    
+    var messagesArea = document.getElementById("messagesArea");
+    var messageInput = document.getElementById("messageInput");
+    
+    var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    var WS_URL = protocol + "//" + window.location.host;
+    
+    var savedName = localStorage.getItem("messengerUsername");
+    if (savedName) {
+        document.getElementById("usernameInput").value = savedName;
     }
+    
+    function login() {
+        var name = document.getElementById("usernameInput").value.trim();
+        if (!name) {
+            alert("Enter your name");
+            return;
+        }
+        if (name.length < 2) {
+            alert("Name must be at least 2 characters");
+            return;
+        }
+        currentUser = name;
+        localStorage.setItem("messengerUsername", name);
+        document.getElementById("loginScreen").style.display = "none";
+        document.getElementById("chatContainer").style.display = "flex";
+        connectWebSocket();
+        setTimeout(function() { messageInput.focus(); }, 300);
+    }
+    
     function connectWebSocket() {
-        const wsUrl = `${WS_URL}?username=${encodeURIComponent(currentUser)}`;
-        if (ws) { try { ws.close(); } catch(e) {} }
+        var wsUrl = WS_URL + "?username=" + encodeURIComponent(currentUser);
+        if (ws) {
+            try { ws.close(); } catch(e) {}
+        }
         ws = new WebSocket(wsUrl);
-        ws.onopen = () => {
-            document.getElementById('connStatus').innerHTML = '🟢 Подключено';
-            document.getElementById('connStatus').style.background = '#1e4a3b';
+        ws.onopen = function() {
+            document.getElementById("connStatus").innerHTML = "Connected";
+            document.getElementById("connStatus").style.background = "#1e4a3b";
             reconnectAttempts = 0;
             if (pingInterval) clearInterval(pingInterval);
-            pingInterval = setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }, 25000);
+            pingInterval = setInterval(function() {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "ping" }));
+                }
+            }, 25000);
         };
-        ws.onmessage = (event) => {
+        ws.onmessage = function(event) {
             try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'message') addMessage(data.user, data.text, data.user === currentUser);
-                else if (data.type === 'user_list') updateOnlineList(data.users);
-                else if (data.type === 'system') addSystemMessage(data.text);
+                var data = JSON.parse(event.data);
+                if (data.type === "message") {
+                    addMessage(data.user, data.text, data.user === currentUser);
+                } else if (data.type === "user_list") {
+                    updateOnlineList(data.users);
+                } else if (data.type === "system") {
+                    addSystemMessage(data.text);
+                }
             } catch(e) {}
         };
-        ws.onerror = () => { document.getElementById('connStatus').innerHTML = '🔴 Ошибка'; document.getElementById('connStatus').style.background = '#6b2e2e'; };
-        ws.onclose = () => {
-            document.getElementById('connStatus').innerHTML = '🔴 Отключено. Переподключение...';
-            document.getElementById('connStatus').style.background = '#6b2e2e';
+        ws.onerror = function() {
+            document.getElementById("connStatus").innerHTML = "Error";
+            document.getElementById("connStatus").style.background = "#6b2e2e";
+        };
+        ws.onclose = function() {
+            document.getElementById("connStatus").innerHTML = "Disconnected. Reconnecting...";
+            document.getElementById("connStatus").style.background = "#6b2e2e";
             if (pingInterval) clearInterval(pingInterval);
             if (reconnectAttempts < 15) {
                 if (reconnectTimeout) clearTimeout(reconnectTimeout);
-                reconnectTimeout = setTimeout(() => { reconnectAttempts++; connectWebSocket(); }, 3000);
+                reconnectTimeout = setTimeout(function() {
+                    reconnectAttempts++;
+                    connectWebSocket();
+                }, 3000);
             }
         };
     }
+    
     function sendMessage() {
-        const text = messageInput.value.trim();
+        var text = messageInput.value.trim();
         if (!text) return;
-        if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'message', text: text })); messageInput.value = ''; }
-        else addSystemMessage('Нет соединения');
-        setTimeout(() => messagesArea.scrollTop = messagesArea.scrollHeight, 50);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "message", text: text }));
+            messageInput.value = "";
+        } else {
+            addSystemMessage("No connection");
+        }
+        setTimeout(function() {
+            messagesArea.scrollTop = messagesArea.scrollHeight;
+        }, 50);
     }
-    function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
+    
+    function handleKeyPress(e) {
+        if (e.key === "Enter") sendMessage();
+    }
+    
     function addMessage(user, text, isOwn) {
-        const div = document.createElement('div');
-        div.className = 'message' + (isOwn ? ' own' : '');
-        const time = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+        var div = document.createElement("div");
+        div.className = "message" + (isOwn ? " own" : "");
+        var time = new Date().toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"});
         div.innerHTML = '<div class="message-name">' + escapeHtml(user) + '</div><div class="message-bubble">' + escapeHtml(text) + '</div><div class="message-time">' + time + '</div>';
         messagesArea.appendChild(div);
         messagesArea.scrollTop = messagesArea.scrollHeight;
-        while (messagesArea.children.length > 500) messagesArea.removeChild(messagesArea.firstChild);
+        while (messagesArea.children.length > 500) {
+            messagesArea.removeChild(messagesArea.firstChild);
+        }
     }
+    
     function addSystemMessage(text) {
-        const div = document.createElement('div');
-        div.className = 'message';
-        div.style.opacity = '0.7';
-        div.style.alignItems = 'center';
-        div.innerHTML = '<div class="message-bubble" style="background:#2b3b4c;border-radius:12px;font-size:12px;">🔹 ' + escapeHtml(text) + '</div>';
+        var div = document.createElement("div");
+        div.className = "message";
+        div.style.opacity = "0.7";
+        div.style.alignItems = "center";
+        div.innerHTML = '<div class="message-bubble" style="background:#2b3b4c;border-radius:12px;font-size:12px;">' + escapeHtml(text) + '</div>';
         messagesArea.appendChild(div);
         messagesArea.scrollTop = messagesArea.scrollHeight;
     }
+    
     function updateOnlineList(users) {
-        document.getElementById('onlineCount').innerHTML = '👥 ' + users.length;
-        const panel = document.getElementById('usersListPanel');
-        if (users.length === 0) panel.innerHTML = '<div style="color:#8e9eae;text-align:center;">Никого нет</div>';
-        else { let html = ''; users.forEach(u => { html += '<div class="user-item' + (u === currentUser ? ' current' : '') + '">' + escapeHtml(u) + (u === currentUser ? ' (вы)' : '') + '</div>'; }); panel.innerHTML = html; }
+        document.getElementById("onlineCount").innerHTML = users.length + " online";
+        var panel = document.getElementById("usersListPanel");
+        if (users.length === 0) {
+            panel.innerHTML = '<div style="color:#8e9eae;text-align:center;">No one online</div>';
+        } else {
+            var html = "";
+            for (var i = 0; i < users.length; i++) {
+                var u = users[i];
+                html += '<div class="user-item' + (u === currentUser ? " current" : "") + '">' + escapeHtml(u) + (u === currentUser ? " (you)" : "") + "</div>";
+            }
+            panel.innerHTML = html;
+        }
     }
-    function toggleUsersPanel() { document.getElementById('usersPanel').classList.toggle('open'); document.getElementById('overlay').classList.toggle('show'); }
-    function escapeHtml(str) { if (!str) return ''; return str.replace(/[&<>]/g, function(m) { if (m === '&') return '&amp;'; if (m === '<') return '&lt;'; if (m === '>') return '&gt;'; return m; }); }
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { document.getElementById('usersPanel').classList.remove('open'); document.getElementById('overlay').classList.remove('show'); } });
+    
+    function toggleUsersPanel() {
+        document.getElementById("usersPanel").classList.toggle("open");
+        document.getElementById("overlay").classList.toggle("show");
+    }
+    
+    function escapeHtml(str) {
+        if (!str) return "";
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === "&") return "&amp;";
+            if (m === "<") return "&lt;";
+            if (m === ">") return "&gt;";
+            return m;
+        });
+    }
+    
+    document.addEventListener("keydown", function(e) {
+        if (e.key === "Escape") {
+            document.getElementById("usersPanel").classList.remove("open");
+            document.getElementById("overlay").classList.remove("show");
+        }
+    });
 </script>
 </body>
 </html>`;
@@ -319,7 +394,7 @@ wss.on('connection', (ws, req) => {
     let currentUser = null;
     let pingInterval = null;
     
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    const url = new URL(req.url, 'http://' + req.headers.host);
     const username = url.searchParams.get('username');
     
     if (!username || !username.trim()) {
@@ -334,23 +409,23 @@ wss.on('connection', (ws, req) => {
         delete users[currentUser];
     }
     
-    users[currentUser] = { ws, lastPing: Date.now() };
-    console.log(`✅ ${currentUser} connected`);
+    users[currentUser] = { ws: ws, lastPing: Date.now() };
+    console.log('User connected: ' + currentUser);
     
-    ws.send(JSON.stringify({ type: 'system', text: `Добро пожаловать, ${currentUser}!` }));
+    ws.send(JSON.stringify({ type: 'system', text: 'Welcome, ' + currentUser + '!' }));
     broadcastUserList();
     
-    pingInterval = setInterval(() => {
+    pingInterval = setInterval(function() {
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }));
         }
     }, 25000);
     
-    ws.on('message', (data) => {
+    ws.on('message', function(data) {
         try {
-            const message = JSON.parse(data);
+            var message = JSON.parse(data);
             if (message.type === 'message' && message.text && message.text.trim()) {
-                console.log(`📨 ${currentUser}: ${message.text}`);
+                console.log('Message from ' + currentUser + ': ' + message.text);
                 broadcast(JSON.stringify({
                     type: 'message',
                     user: currentUser,
@@ -358,13 +433,15 @@ wss.on('connection', (ws, req) => {
                     timestamp: Date.now()
                 }));
             } else if (message.type === 'ping') {
-                if (users[currentUser]) users[currentUser].lastPing = Date.now();
+                if (users[currentUser]) {
+                    users[currentUser].lastPing = Date.now();
+                }
             }
         } catch(e) {}
     });
     
-    ws.on('close', () => {
-        console.log(`❌ ${currentUser} disconnected`);
+    ws.on('close', function() {
+        console.log('User disconnected: ' + currentUser);
         if (pingInterval) clearInterval(pingInterval);
         if (currentUser && users[currentUser]) {
             delete users[currentUser];
@@ -374,7 +451,7 @@ wss.on('connection', (ws, req) => {
 });
 
 function broadcast(data) {
-    for (let user in users) {
+    for (var user in users) {
         if (users[user].ws.readyState === WebSocket.OPEN) {
             try { users[user].ws.send(data); } catch(e) {}
         }
@@ -382,13 +459,13 @@ function broadcast(data) {
 }
 
 function broadcastUserList() {
-    const userList = Object.keys(users);
+    var userList = Object.keys(users);
     broadcast(JSON.stringify({ type: 'user_list', users: userList }));
-    console.log(`👥 Online: ${userList.length}`);
+    console.log('Online: ' + userList.length);
 }
 
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-    console.log(`🎉 Server running on port ${PORT}`);
-    console.log(`📱 Client: https://crispy-octo-goggles.onrender.com`);
+var PORT = process.env.PORT || 8080;
+server.listen(PORT, function() {
+    console.log('Server running on port ' + PORT);
+    console.log('Client: https://crispy-octo-goggles.onrender.com');
 });

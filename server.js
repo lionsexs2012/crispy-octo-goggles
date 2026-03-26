@@ -2,7 +2,6 @@ const WebSocket = require('ws');
 const http = require('http');
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
@@ -13,15 +12,12 @@ const wss = new WebSocket.Server({ server });
 const db = new sqlite3.Database('./messenger.db');
 
 db.serialize(() => {
-    // Пользователи
     db.run(`CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
-        public_key TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
     
-    // Сообщения
     db.run(`CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         from_user TEXT,
@@ -33,20 +29,14 @@ db.serialize(() => {
         is_read INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
-    
-    // Сессии
-    db.run(`CREATE TABLE IF NOT EXISTS sessions (
-        username TEXT PRIMARY KEY,
-        ws_id TEXT,
-        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
 });
 
 // ============== ШИФРОВАНИЕ ==============
-const ENCRYPTION_KEY = crypto.randomBytes(32); // В продакшене хранить в переменной окружения!
+const ENCRYPTION_KEY = crypto.randomBytes(32);
 const IV_LENGTH = 16;
 
 function encrypt(text) {
+    if (!text) return '';
     const iv = crypto.randomBytes(IV_LENGTH);
     const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
     let encrypted = cipher.update(text, 'utf8', 'hex');
@@ -55,6 +45,7 @@ function encrypt(text) {
 }
 
 function decrypt(text) {
+    if (!text) return '';
     const parts = text.split(':');
     const iv = Buffer.from(parts.shift(), 'hex');
     const encryptedText = parts.join(':');
@@ -64,44 +55,9 @@ function decrypt(text) {
     return decrypted;
 }
 
-// ============== ХРАНЕНИЕ АКТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ ==============
-let activeUsers = {}; // username -> { ws, privateKey? }
+// ============== АКТИВНЫЕ ПОЛЬЗОВАТЕЛИ ==============
+let activeUsers = {};
 
-// ============== ФУНКЦИИ БАЗЫ ДАННЫХ ==============
-function saveMessage(from, to, encryptedMsg, fileData = null, fileName = null, fileType = null) {
-    return new Promise((resolve, reject) => {
-        db.run(
-            `INSERT INTO messages (from_user, to_user, encrypted_message, file_data, file_name, file_type) 
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [from, to, encryptedMsg, fileData, fileName, fileType],
-            function(err) {
-                if (err) reject(err);
-                else resolve(this.lastID);
-            }
-        );
-    });
-}
-
-function getMessages(user1, user2, limit = 50) {
-    return new Promise((resolve, reject) => {
-        db.all(
-            `SELECT * FROM messages 
-             WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
-             ORDER BY created_at DESC LIMIT ?`,
-            [user1, user2, user2, user1, limit],
-            (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows.reverse());
-            }
-        );
-    });
-}
-
-function markAsRead(messageId) {
-    db.run(`UPDATE messages SET is_read = 1 WHERE id = ?`, [messageId]);
-}
-
-// ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
 function broadcast(data) {
     for (let user in activeUsers) {
         if (activeUsers[user].ws.readyState === WebSocket.OPEN) {
@@ -119,6 +75,54 @@ function sendToUser(username, data) {
 function broadcastUserList() {
     const userList = Object.keys(activeUsers);
     broadcast({ type: 'user_list', users: userList });
+}
+
+function saveMessage(from, to, encryptedMsg, fileData = null, fileName = null, fileType = null) {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `INSERT INTO messages (from_user, to_user, encrypted_message, file_data, file_name, file_type) 
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [from, to, encryptedMsg, fileData, fileName, fileType],
+            function(err) { if (err) reject(err); else resolve(this.lastID); }
+        );
+    });
+}
+
+function getPrivateMessages(user1, user2, limit = 100) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            `SELECT * FROM messages 
+             WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
+             ORDER BY created_at ASC LIMIT ?`,
+            [user1, user2, user2, user1, limit],
+            (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            }
+        );
+    });
+}
+
+function getAllChats(username) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            `SELECT DISTINCT 
+                CASE 
+                    WHEN from_user = ? THEN to_user
+                    ELSE from_user
+                END as chat_partner,
+                MAX(created_at) as last_message_time
+             FROM messages 
+             WHERE from_user = ? OR to_user = ?
+             GROUP BY chat_partner
+             ORDER BY last_message_time DESC`,
+            [username, username, username],
+            (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            }
+        );
+    });
 }
 
 // ============== HTML КЛИЕНТ ==============
@@ -207,14 +211,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             color: #fff;
             font-size: 12px;
         }
-        .private-badge {
-            background: #6b2e2e;
-            padding: 6px 12px;
-            border-radius: 20px;
-            color: #fff;
-            font-size: 11px;
-            cursor: pointer;
-        }
         .connection-status {
             font-size: 11px;
             padding: 6px;
@@ -222,31 +218,56 @@ const HTML_PAGE = `<!DOCTYPE html>
             background: #2b3b4c;
             color: #fff;
         }
-        .chat-area {
+        .main-layout {
             display: flex;
             flex: 1;
             overflow: hidden;
         }
-        .users-sidebar {
-            width: 260px;
+        .chats-sidebar {
+            width: 280px;
             background: #17212b;
             border-right: 1px solid #2b3b4c;
-            overflow-y: auto;
-            display: none;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
-        .users-sidebar.show {
-            display: block;
-        }
-        .user-item {
+        .chats-header {
             padding: 12px 16px;
-            color: #fff;
+            border-bottom: 1px solid #2b3b4c;
+            color: #8e9eae;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .chats-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+        .chat-item {
+            padding: 12px 16px;
             cursor: pointer;
             border-bottom: 1px solid #2b3b4c;
+            transition: background 0.2s;
         }
-        .user-item:hover { background: #242f3e; }
-        .user-item.active { background: #2b5278; }
-        .user-item.online { border-left: 3px solid #2b5278; }
-        .messages-area {
+        .chat-item:hover { background: #242f3e; }
+        .chat-item.active { background: #2b5278; }
+        .chat-name {
+            color: #fff;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+        .chat-preview {
+            color: #8e9eae;
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .chat-time {
+            font-size: 10px;
+            color: #6c7a89;
+            margin-top: 2px;
+        }
+        .chat-area {
             flex: 1;
             display: flex;
             flex-direction: column;
@@ -264,7 +285,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
         .message.own { align-items: flex-end; }
         .message-bubble {
-            max-width: 80%;
+            max-width: 70%;
             padding: 10px 14px;
             border-radius: 18px;
             word-wrap: break-word;
@@ -319,19 +340,13 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
         .file-btn {
             background: #242f3e;
-            padding: 12px;
+            padding: 12px 16px;
             border-radius: 24px;
             cursor: pointer;
+            color: #8e9eae;
         }
-        .private-indicator {
-            background: #6b2e2e;
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 10px;
-            margin-left: 8px;
-        }
-        @media (max-width: 768px) {
-            .users-sidebar { width: 200px; }
+        @media (max-width: 600px) {
+            .chats-sidebar { width: 240px; }
         }
     </style>
 </head>
@@ -341,7 +356,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         <h2>🔒 Secure Messenger</h2>
         <p>Enter your name to start</p>
         <input type="text" id="usernameInput" placeholder="Your name" maxlength="24">
-        <button onclick="login()">Join</button>
+        <button id="loginBtn">Join</button>
     </div>
 </div>
 <div class="chat-container" id="chatContainer">
@@ -349,20 +364,19 @@ const HTML_PAGE = `<!DOCTYPE html>
         <h2 id="chatTitle">💬 Secure Messenger</h2>
         <div class="header-right">
             <div class="online-badge" id="onlineCount">0 online</div>
-            <div class="private-badge" id="privateBadge" onclick="togglePrivateMode()">🔓 Public</div>
-            <button style="background:none; border:none; color:#8e9eae; font-size:20px;" onclick="toggleSidebar()">☰</button>
         </div>
     </div>
     <div class="connection-status" id="connStatus">Connecting...</div>
-    <div class="chat-area">
-        <div class="users-sidebar" id="usersSidebar">
-            <div class="users-list" id="usersList"></div>
+    <div class="main-layout">
+        <div class="chats-sidebar">
+            <div class="chats-header">💬 CHATS</div>
+            <div class="chats-list" id="chatsList"></div>
         </div>
-        <div class="messages-area">
+        <div class="chat-area">
             <div class="messages-list" id="messagesList"></div>
             <div class="input-area">
                 <div class="file-btn" onclick="document.getElementById('fileInput').click()">📎</div>
-                <input type="text" id="messageInput" placeholder="Message..." onkeypress="handleKeyPress(event)">
+                <input type="text" id="messageInput" placeholder="Type a message..." onkeypress="handleKeyPress(event)">
                 <button onclick="sendMessage()">Send</button>
             </div>
         </div>
@@ -373,10 +387,10 @@ const HTML_PAGE = `<!DOCTYPE html>
 <script>
     let ws = null;
     let currentUser = "";
-    let currentChat = "public";
-    let isPrivateMode = false;
+    let currentChat = null;
     let reconnectAttempts = 0;
     let pingInterval = null;
+    let allUsers = [];
     
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const WS_URL = protocol + "//" + window.location.host;
@@ -386,10 +400,26 @@ const HTML_PAGE = `<!DOCTYPE html>
         document.getElementById("usernameInput").value = savedName;
     }
     
+    document.getElementById("loginBtn").onclick = function() {
+        login();
+    };
+    
+    document.getElementById("usernameInput").onkeypress = function(e) {
+        if (e.key === "Enter") {
+            login();
+        }
+    };
+    
     function login() {
         let name = document.getElementById("usernameInput").value.trim();
-        if (!name) { alert("Enter your name"); return; }
-        if (name.length < 2) { alert("Name must be at least 2 characters"); return; }
+        if (!name) {
+            alert("Enter your name");
+            return;
+        }
+        if (name.length < 2) {
+            alert("Name must be at least 2 characters");
+            return;
+        }
         currentUser = name;
         localStorage.setItem("messengerUsername", name);
         document.getElementById("loginScreen").style.display = "none";
@@ -399,10 +429,13 @@ const HTML_PAGE = `<!DOCTYPE html>
     
     function connectWebSocket() {
         let wsUrl = WS_URL + "?username=" + encodeURIComponent(currentUser);
-        if (ws) { try { ws.close(); } catch(e) {} }
+        if (ws) {
+            try { ws.close(); } catch(e) {}
+        }
         ws = new WebSocket(wsUrl);
+        
         ws.onopen = function() {
-            document.getElementById("connStatus").innerHTML = "Connected";
+            document.getElementById("connStatus").innerHTML = "🟢 Connected";
             document.getElementById("connStatus").style.background = "#1e4a3b";
             reconnectAttempts = 0;
             if (pingInterval) clearInterval(pingInterval);
@@ -411,102 +444,128 @@ const HTML_PAGE = `<!DOCTYPE html>
                     ws.send(JSON.stringify({ type: "ping" }));
                 }
             }, 25000);
-            loadHistory();
+            loadChats();
         };
+        
         ws.onmessage = function(event) {
             try {
                 let data = JSON.parse(event.data);
-                switch(data.type) {
-                    case 'message':
-                        if ((isPrivateMode && data.from === currentChat) || (!isPrivateMode && data.to === "public")) {
-                            addMessage(data.from, data.text, data.from === currentUser, data.file, data.fileName);
-                        }
-                        break;
-                    case 'private_message':
-                        if (isPrivateMode && data.from === currentChat) {
-                            addMessage(data.from, data.text, data.from === currentUser, data.file, data.fileName);
-                        } else if (!isPrivateMode && data.from === currentUser) {
-                            // notif
-                        }
-                        break;
-                    case 'user_list':
-                        updateUserList(data.users);
-                        break;
-                    case 'history':
-                        loadHistoryMessages(data.messages);
-                        break;
-                    case 'system':
-                        addSystemMessage(data.text);
-                        break;
+                if (data.type === "message") {
+                    if (currentChat === data.from) {
+                        addMessage(data.from, data.text, false, data.file, data.fileName);
+                    }
+                    loadChats();
+                } else if (data.type === "private_message") {
+                    if (currentChat === data.from) {
+                        addMessage(data.from, data.text, false, data.file, data.fileName);
+                    }
+                    loadChats();
+                } else if (data.type === "user_list") {
+                    allUsers = data.users;
+                    updateOnlineCount();
+                    loadChats();
+                } else if (data.type === "history") {
+                    displayMessages(data.messages);
+                } else if (data.type === "chats_list") {
+                    displayChats(data.chats);
+                } else if (data.type === "system") {
+                    addSystemMessage(data.text);
                 }
-            } catch(e) {}
+            } catch(e) {
+                console.log("Parse error:", e);
+            }
         };
+        
         ws.onerror = function() {
-            document.getElementById("connStatus").innerHTML = "Error";
+            document.getElementById("connStatus").innerHTML = "🔴 Error";
             document.getElementById("connStatus").style.background = "#6b2e2e";
         };
+        
         ws.onclose = function() {
-            document.getElementById("connStatus").innerHTML = "Disconnected. Reconnecting...";
+            document.getElementById("connStatus").innerHTML = "🔴 Disconnected. Reconnecting...";
             document.getElementById("connStatus").style.background = "#6b2e2e";
             if (pingInterval) clearInterval(pingInterval);
             if (reconnectAttempts < 15) {
-                setTimeout(function() { reconnectAttempts++; connectWebSocket(); }, 3000);
+                setTimeout(function() {
+                    reconnectAttempts++;
+                    connectWebSocket();
+                }, 3000);
             }
         };
     }
     
-    function loadHistory() {
+    function loadChats() {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "get_history", with: currentChat, private: isPrivateMode }));
+            ws.send(JSON.stringify({ type: "get_chats" }));
         }
     }
     
-    function loadHistoryMessages(messages) {
+    function displayChats(chats) {
+        let container = document.getElementById("chatsList");
+        if (!container) return;
+        
+        let html = "";
+        
+        for (let i = 0; i < chats.length; i++) {
+            let chat = chats[i];
+            let isActive = (currentChat === chat.username);
+            let preview = chat.last_message ? (chat.last_message.length > 30 ? chat.last_message.substring(0, 30) + "..." : chat.last_message) : "No messages yet";
+            let time = chat.last_time ? new Date(chat.last_time).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "";
+            
+            html += '<div class="chat-item ' + (isActive ? "active" : "") + '" onclick="selectChat(\'' + escapeHtml(chat.username) + '\')">';
+            html += '<div class="chat-name">' + escapeHtml(chat.username) + '</div>';
+            html += '<div class="chat-preview">' + escapeHtml(preview) + '</div>';
+            if (time) html += '<div class="chat-time">' + time + '</div>';
+            html += '</div>';
+        }
+        
+        if (html === "") {
+            html = '<div style="padding: 16px; color: #8e9eae; text-align: center;">No chats yet<br>Send a message to someone</div>';
+        }
+        
+        container.innerHTML = html;
+        updateOnlineCount();
+    }
+    
+    function selectChat(username) {
+        if (username === currentUser) return;
+        currentChat = username;
+        document.getElementById("chatTitle").innerHTML = "💬 Chat with " + escapeHtml(username);
+        document.getElementById("messagesList").innerHTML = "";
+        
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "get_history", with: username }));
+        }
+        
+        loadChats();
+    }
+    
+    function displayMessages(messages) {
         let container = document.getElementById("messagesList");
         container.innerHTML = "";
-        messages.forEach(msg => {
-            addMessage(msg.from_user, msg.encrypted_message ? decryptMessage(msg.encrypted_message) : msg.text, msg.from_user === currentUser, msg.file_data, msg.file_name);
-        });
-    }
-    
-    function decryptMessage(encrypted) {
-        // На клиенте шифрование/дешифрование через сервер
-        return encrypted;
-    }
-    
-    function sendMessage() {
-        let text = document.getElementById("messageInput").value.trim();
-        if (!text) return;
-        let messageData = { type: "message", text: text, private: isPrivateMode, to: currentChat };
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(messageData));
-            document.getElementById("messageInput").value = "";
-            if (isPrivateMode) {
-                addMessage(currentUser, text, true);
+        for (let i = 0; i < messages.length; i++) {
+            let msg = messages[i];
+            let text = msg.encrypted_message ? msg.encrypted_message : msg.text;
+            let isOwn = (msg.from_user === currentUser);
+            if (msg.file_data) {
+                addMessageToContainer(container, msg.from_user, null, true, msg.file_data, msg.file_name, isOwn, msg.created_at);
+            } else {
+                addMessageToContainer(container, msg.from_user, text, false, null, null, isOwn, msg.created_at);
             }
-        } else {
-            addSystemMessage("No connection");
         }
-    }
-    
-    function sendFile(file) {
-        if (!file) return;
-        let reader = new FileReader();
-        reader.onload = function(e) {
-            let base64 = e.target.result.split(',')[1];
-            let messageData = { type: "file", fileName: file.name, fileType: file.type, fileData: base64, private: isPrivateMode, to: currentChat };
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(messageData));
-            }
-        };
-        reader.readAsDataURL(file);
+        container.scrollTop = container.scrollHeight;
     }
     
     function addMessage(user, text, isOwn, fileData, fileName) {
         let container = document.getElementById("messagesList");
+        addMessageToContainer(container, user, text, false, fileData, fileName, isOwn, new Date());
+        container.scrollTop = container.scrollHeight;
+    }
+    
+    function addMessageToContainer(container, user, text, isEncrypted, fileData, fileName, isOwn, timestamp) {
         let div = document.createElement("div");
         div.className = "message" + (isOwn ? " own" : "");
-        let time = new Date().toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"});
+        let time = new Date(timestamp).toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"});
         
         if (fileData && fileName) {
             let fileUrl = "data:application/octet-stream;base64," + fileData;
@@ -514,12 +573,12 @@ const HTML_PAGE = `<!DOCTYPE html>
                 '<div class="message-file" onclick="downloadFile(\'' + fileUrl + '\', \'' + fileName + '\')">📎 ' + escapeHtml(fileName) + '</div>' +
                 '<div class="message-time">' + time + '</div>';
         } else {
+            let displayText = isEncrypted ? "🔒 Encrypted message" : text;
             div.innerHTML = '<div class="message-name">' + escapeHtml(user) + '</div>' +
-                '<div class="message-bubble">' + escapeHtml(text) + '</div>' +
+                '<div class="message-bubble">' + escapeHtml(displayText) + '</div>' +
                 '<div class="message-time">' + time + '</div>';
         }
         container.appendChild(div);
-        container.scrollTop = container.scrollHeight;
     }
     
     function downloadFile(url, name) {
@@ -534,55 +593,54 @@ const HTML_PAGE = `<!DOCTYPE html>
         let div = document.createElement("div");
         div.className = "message";
         div.style.opacity = "0.7";
-        div.style.textAlign = "center";
+        div.style.alignItems = "center";
         div.innerHTML = '<div class="message-bubble" style="background:#2b3b4c;font-size:12px;">' + escapeHtml(text) + '</div>';
         container.appendChild(div);
         container.scrollTop = container.scrollHeight;
     }
     
-    function updateUserList(users) {
-        document.getElementById("onlineCount").innerHTML = users.length + " online";
-        let container = document.getElementById("usersList");
-        let html = '<div class="user-item" onclick="selectChat(\'public\')">🌍 Public Chat</div>';
-        users.forEach(u => {
-            if (u !== currentUser) {
-                html += '<div class="user-item ' + (currentChat === u ? 'active' : '') + '" onclick="selectChat(\'' + escapeHtml(u) + '\')">💬 ' + escapeHtml(u) + '</div>';
-            }
-        });
-        container.innerHTML = html;
+    function updateOnlineCount() {
+        let count = allUsers.filter(u => u !== currentUser).length;
+        document.getElementById("onlineCount").innerHTML = count + " online";
     }
     
-    function selectChat(user) {
-        currentChat = user;
-        isPrivateMode = true;
-        document.getElementById("chatTitle").innerHTML = "💬 Chat with " + escapeHtml(user);
-        document.getElementById("privateBadge").innerHTML = "🔒 Private";
-        document.getElementById("privateBadge").style.background = "#1e4a3b";
-        document.getElementById("messagesList").innerHTML = "";
-        loadHistory();
-    }
-    
-    function togglePrivateMode() {
-        if (isPrivateMode) {
-            currentChat = "public";
-            isPrivateMode = false;
-            document.getElementById("chatTitle").innerHTML = "💬 Secure Messenger";
-            document.getElementById("privateBadge").innerHTML = "🔓 Public";
-            document.getElementById("privateBadge").style.background = "#6b2e2e";
-            document.getElementById("messagesList").innerHTML = "";
-            loadHistory();
+    function sendMessage() {
+        let text = document.getElementById("messageInput").value.trim();
+        if (!text) return;
+        if (!currentChat) {
+            addSystemMessage("Select a chat first");
+            return;
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "message", text: text, to: currentChat, private: true }));
+            document.getElementById("messageInput").value = "";
+            addMessage(currentUser, text, true, null, null);
         } else {
-            // switch to private mode - select first user or show sidebar
-            document.getElementById("usersSidebar").classList.toggle("show");
+            addSystemMessage("No connection");
         }
     }
     
-    function toggleSidebar() {
-        document.getElementById("usersSidebar").classList.toggle("show");
+    function sendFile(file) {
+        if (!file) return;
+        if (!currentChat) {
+            addSystemMessage("Select a chat first");
+            return;
+        }
+        let reader = new FileReader();
+        reader.onload = function(e) {
+            let base64 = e.target.result.split(",")[1];
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "file", fileName: file.name, fileType: file.type, fileData: base64, to: currentChat, private: true }));
+                addMessage(currentUser, null, true, base64, file.name);
+            }
+        };
+        reader.readAsDataURL(file);
     }
     
     function handleKeyPress(e) {
-        if (e.key === "Enter") sendMessage();
+        if (e.key === "Enter") {
+            sendMessage();
+        }
     }
     
     function escapeHtml(str) {
@@ -598,20 +656,16 @@ const HTML_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-// ============== EXPRESS РОУТЫ ==============
+// ============== EXPRESS ==============
 app.get('/', (req, res) => {
     res.send(HTML_PAGE);
 });
 
 app.get('/api/status', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        users: Object.keys(activeUsers), 
-        count: Object.keys(activeUsers).length 
-    });
+    res.json({ status: 'ok', users: Object.keys(activeUsers), count: Object.keys(activeUsers).length });
 });
 
-// ============== WEBSOCKET ОБРАБОТЧИК ==============
+// ============== WEBSOCKET ==============
 wss.on('connection', (ws, req) => {
     let currentUser = null;
     let pingInterval = null;
@@ -626,10 +680,8 @@ wss.on('connection', (ws, req) => {
     
     currentUser = username.trim();
     
-    // Сохраняем пользователя в БД
     db.run(`INSERT OR IGNORE INTO users (username) VALUES (?)`, [currentUser]);
     
-    // Отключаем старого пользователя если был
     if (activeUsers[currentUser]) {
         try { activeUsers[currentUser].ws.close(); } catch(e) {}
         delete activeUsers[currentUser];
@@ -651,36 +703,24 @@ wss.on('connection', (ws, req) => {
         try {
             const message = JSON.parse(data);
             
-            if (message.type === 'message') {
+            if (message.type === 'message' && message.text && message.to) {
                 let encryptedMsg = encrypt(message.text);
-                let target = message.private ? message.to : 'public';
+                await saveMessage(currentUser, message.to, encryptedMsg);
                 
-                await saveMessage(currentUser, target, encryptedMsg);
-                
-                if (message.private && activeUsers[message.to]) {
+                if (activeUsers[message.to]) {
                     sendToUser(message.to, {
                         type: 'private_message',
                         from: currentUser,
                         text: message.text,
                         timestamp: Date.now()
                     });
-                } else if (!message.private) {
-                    broadcast({
-                        type: 'message',
-                        from: currentUser,
-                        text: message.text,
-                        to: 'public',
-                        timestamp: Date.now()
-                    });
                 }
+                console.log(`📨 ${currentUser} -> ${message.to}: ${message.text}`);
                 
-                console.log(`📨 ${currentUser} -> ${target}: ${message.text}`);
+            } else if (message.type === 'file' && message.fileData && message.to) {
+                await saveMessage(currentUser, message.to, '', message.fileData, message.fileName, message.fileType);
                 
-            } else if (message.type === 'file') {
-                let target = message.private ? message.to : 'public';
-                await saveMessage(currentUser, target, '', message.fileData, message.fileName, message.fileType);
-                
-                if (message.private && activeUsers[message.to]) {
+                if (activeUsers[message.to]) {
                     sendToUser(message.to, {
                         type: 'private_message',
                         from: currentUser,
@@ -688,21 +728,25 @@ wss.on('connection', (ws, req) => {
                         fileName: message.fileName,
                         timestamp: Date.now()
                     });
-                } else if (!message.private) {
-                    broadcast({
-                        type: 'message',
-                        from: currentUser,
-                        file: message.fileData,
-                        fileName: message.fileName,
-                        to: 'public',
-                        timestamp: Date.now()
-                    });
                 }
+                console.log(`📎 ${currentUser} -> ${message.to}: ${message.fileName}`);
                 
-            } else if (message.type === 'get_history') {
-                let target = message.private ? message.with : 'public';
-                let history = await getMessages(currentUser, target);
+            } else if (message.type === 'get_history' && message.with) {
+                let history = await getPrivateMessages(currentUser, message.with);
                 ws.send(JSON.stringify({ type: 'history', messages: history }));
+                
+            } else if (message.type === 'get_chats') {
+                let chats = await getAllChats(currentUser);
+                let chatList = [];
+                for (let chat of chats) {
+                    let lastMsg = await getPrivateMessages(currentUser, chat.chat_partner, 1);
+                    chatList.push({
+                        username: chat.chat_partner,
+                        last_message: lastMsg.length > 0 ? (lastMsg[0].encrypted_message ? '🔒 Encrypted' : lastMsg[0].text) : null,
+                        last_time: lastMsg.length > 0 ? lastMsg[0].created_at : null
+                    });
+                }
+                ws.send(JSON.stringify({ type: 'chats_list', chats: chatList }));
                 
             } else if (message.type === 'ping') {
                 if (activeUsers[currentUser]) {
@@ -710,7 +754,7 @@ wss.on('connection', (ws, req) => {
                 }
             }
         } catch(e) {
-            console.log('Parse error:', e.message);
+            console.log('Error:', e.message);
         }
     });
     

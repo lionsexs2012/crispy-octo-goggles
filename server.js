@@ -3,6 +3,7 @@ const http = require('http');
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const crypto = require('crypto');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -13,8 +14,7 @@ const db = new sqlite3.Database('./messenger.db');
 
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
+        username TEXT PRIMARY KEY,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
     
@@ -22,11 +22,9 @@ db.serialize(() => {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         from_user TEXT,
         to_user TEXT,
-        encrypted_message TEXT,
+        message TEXT,
         file_data TEXT,
         file_name TEXT,
-        file_type TEXT,
-        is_read INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 });
@@ -45,7 +43,7 @@ function encrypt(text) {
 }
 
 function decrypt(text) {
-    if (!text) return '';
+    if (!text || !text.includes(':')) return text;
     const parts = text.split(':');
     const iv = Buffer.from(parts.shift(), 'hex');
     const encryptedText = parts.join(':');
@@ -73,61 +71,48 @@ function sendToUser(username, data) {
 }
 
 function broadcastUserList() {
-    const userList = Object.keys(activeUsers);
-    broadcast({ type: 'user_list', users: userList });
+    broadcast({ type: 'user_list', users: Object.keys(activeUsers) });
 }
 
-function saveMessage(from, to, encryptedMsg, fileData = null, fileName = null, fileType = null) {
+function saveMessage(from, to, message, fileData = null, fileName = null) {
     return new Promise((resolve, reject) => {
         db.run(
-            `INSERT INTO messages (from_user, to_user, encrypted_message, file_data, file_name, file_type) 
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [from, to, encryptedMsg, fileData, fileName, fileType],
+            `INSERT INTO messages (from_user, to_user, message, file_data, file_name) VALUES (?, ?, ?, ?, ?)`,
+            [from, to, message, fileData, fileName],
             function(err) { if (err) reject(err); else resolve(this.lastID); }
         );
     });
 }
 
-function getPrivateMessages(user1, user2, limit = 100) {
+function getMessages(user1, user2) {
     return new Promise((resolve, reject) => {
         db.all(
             `SELECT * FROM messages 
              WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
-             ORDER BY created_at ASC LIMIT ?`,
-            [user1, user2, user2, user1, limit],
-            (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            }
+             ORDER BY created_at ASC`,
+            [user1, user2, user2, user1],
+            (err, rows) => { if (err) reject(err); else resolve(rows); }
         );
     });
 }
 
-function getAllChats(username) {
+function getUserChats(username) {
     return new Promise((resolve, reject) => {
         db.all(
             `SELECT DISTINCT 
-                CASE 
-                    WHEN from_user = ? THEN to_user
-                    ELSE from_user
-                END as chat_partner,
-                MAX(created_at) as last_message_time
-             FROM messages 
-             WHERE from_user = ? OR to_user = ?
-             GROUP BY chat_partner
-             ORDER BY last_message_time DESC`,
+                CASE WHEN from_user = ? THEN to_user ELSE from_user END as chat_user,
+                MAX(created_at) as last_time
+             FROM messages WHERE from_user = ? OR to_user = ?
+             GROUP BY chat_user ORDER BY last_time DESC`,
             [username, username, username],
-            (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            }
+            (err, rows) => { if (err) reject(err); else resolve(rows); }
         );
     });
 }
 
-// ============== HTML КЛИЕНТ ==============
+// ============== HTML СТРАНИЦА ==============
 const HTML_PAGE = `<!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -144,7 +129,10 @@ const HTML_PAGE = `<!DOCTYPE html>
         }
         .login-screen {
             position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             background: #0e1621;
             display: flex;
             align-items: center;
@@ -199,11 +187,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             border-bottom: 1px solid #2b3b4c;
         }
         .chat-header h2 { color: #fff; font-size: 18px; }
-        .header-right {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-        }
         .online-badge {
             background: #2b5278;
             padding: 6px 12px;
@@ -211,7 +194,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             color: #fff;
             font-size: 12px;
         }
-        .connection-status {
+        .status-bar {
             font-size: 11px;
             padding: 6px;
             text-align: center;
@@ -229,7 +212,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             border-right: 1px solid #2b3b4c;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
         }
         .chats-header {
             padding: 12px 16px;
@@ -246,27 +228,11 @@ const HTML_PAGE = `<!DOCTYPE html>
             padding: 12px 16px;
             cursor: pointer;
             border-bottom: 1px solid #2b3b4c;
-            transition: background 0.2s;
         }
         .chat-item:hover { background: #242f3e; }
         .chat-item.active { background: #2b5278; }
-        .chat-name {
-            color: #fff;
-            font-weight: 500;
-            margin-bottom: 4px;
-        }
-        .chat-preview {
-            color: #8e9eae;
-            font-size: 11px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .chat-time {
-            font-size: 10px;
-            color: #6c7a89;
-            margin-top: 2px;
-        }
+        .chat-name { color: #fff; font-weight: 500; margin-bottom: 4px; }
+        .chat-preview { color: #8e9eae; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .chat-area {
             flex: 1;
             display: flex;
@@ -307,9 +273,6 @@ const HTML_PAGE = `<!DOCTYPE html>
             background: #242f3e;
             padding: 8px 12px;
             border-radius: 12px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
             cursor: pointer;
         }
         .input-area {
@@ -351,22 +314,22 @@ const HTML_PAGE = `<!DOCTYPE html>
     </style>
 </head>
 <body>
+
 <div class="login-screen" id="loginScreen">
     <div class="login-card">
         <h2>🔒 Secure Messenger</h2>
         <p>Enter your name to start</p>
-        <input type="text" id="usernameInput" placeholder="Your name" maxlength="24">
-        <button id="loginBtn">Join</button>
+        <input type="text" id="username" placeholder="Your name" maxlength="24">
+        <button id="joinBtn">Join</button>
     </div>
 </div>
+
 <div class="chat-container" id="chatContainer">
     <div class="chat-header">
         <h2 id="chatTitle">💬 Secure Messenger</h2>
-        <div class="header-right">
-            <div class="online-badge" id="onlineCount">0 online</div>
-        </div>
+        <div class="online-badge" id="onlineCount">0 online</div>
     </div>
-    <div class="connection-status" id="connStatus">Connecting...</div>
+    <div class="status-bar" id="statusBar">Connecting...</div>
     <div class="main-layout">
         <div class="chats-sidebar">
             <div class="chats-header">💬 CHATS</div>
@@ -375,73 +338,78 @@ const HTML_PAGE = `<!DOCTYPE html>
         <div class="chat-area">
             <div class="messages-list" id="messagesList"></div>
             <div class="input-area">
-                <div class="file-btn" onclick="document.getElementById('fileInput').click()">📎</div>
-                <input type="text" id="messageInput" placeholder="Type a message..." onkeypress="handleKeyPress(event)">
-                <button onclick="sendMessage()">Send</button>
+                <div class="file-btn" id="fileBtn">📎</div>
+                <input type="text" id="messageInput" placeholder="Type a message..." id="msgInput">
+                <button id="sendBtn">Send</button>
             </div>
         </div>
     </div>
 </div>
-<input type="file" id="fileInput" style="display:none" onchange="sendFile(this.files[0])">
+
+<input type="file" id="fileInput" style="display:none">
 
 <script>
+    // DOM elements
+    const loginScreen = document.getElementById('loginScreen');
+    const chatContainer = document.getElementById('chatContainer');
+    const usernameInput = document.getElementById('username');
+    const joinBtn = document.getElementById('joinBtn');
+    const statusBar = document.getElementById('statusBar');
+    const onlineCountSpan = document.getElementById('onlineCount');
+    const chatTitle = document.getElementById('chatTitle');
+    const chatsList = document.getElementById('chatsList');
+    const messagesList = document.getElementById('messagesList');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const fileBtn = document.getElementById('fileBtn');
+    const fileInput = document.getElementById('fileInput');
+    
     let ws = null;
-    let currentUser = "";
+    let currentUser = '';
     let currentChat = null;
     let reconnectAttempts = 0;
     let pingInterval = null;
-    let allUsers = [];
     
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const WS_URL = protocol + "//" + window.location.host;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const WS_URL = protocol + '//' + window.location.host;
     
-    const savedName = localStorage.getItem("messengerUsername");
-    if (savedName) {
-        document.getElementById("usernameInput").value = savedName;
-    }
+    // Load saved username
+    const saved = localStorage.getItem('username');
+    if (saved) usernameInput.value = saved;
     
-    document.getElementById("loginBtn").onclick = function() {
-        login();
-    };
-    
-    document.getElementById("usernameInput").onkeypress = function(e) {
-        if (e.key === "Enter") {
-            login();
-        }
-    };
-    
+    // Login function
     function login() {
-        let name = document.getElementById("usernameInput").value.trim();
+        const name = usernameInput.value.trim();
         if (!name) {
-            alert("Enter your name");
+            alert('Enter your name');
             return;
         }
         if (name.length < 2) {
-            alert("Name must be at least 2 characters");
+            alert('Name must be at least 2 characters');
             return;
         }
         currentUser = name;
-        localStorage.setItem("messengerUsername", name);
-        document.getElementById("loginScreen").style.display = "none";
-        document.getElementById("chatContainer").style.display = "flex";
-        connectWebSocket();
+        localStorage.setItem('username', name);
+        loginScreen.style.display = 'none';
+        chatContainer.style.display = 'flex';
+        connect();
     }
     
-    function connectWebSocket() {
-        let wsUrl = WS_URL + "?username=" + encodeURIComponent(currentUser);
-        if (ws) {
-            try { ws.close(); } catch(e) {}
-        }
+    // Connect WebSocket
+    function connect() {
+        const wsUrl = WS_URL + '?username=' + encodeURIComponent(currentUser);
+        if (ws) try { ws.close(); } catch(e) {}
+        
         ws = new WebSocket(wsUrl);
         
         ws.onopen = function() {
-            document.getElementById("connStatus").innerHTML = "🟢 Connected";
-            document.getElementById("connStatus").style.background = "#1e4a3b";
+            statusBar.innerHTML = '🟢 Connected';
+            statusBar.style.background = '#1e4a3b';
             reconnectAttempts = 0;
             if (pingInterval) clearInterval(pingInterval);
             pingInterval = setInterval(function() {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: "ping" }));
+                    ws.send(JSON.stringify({ type: 'ping' }));
                 }
             }, 25000);
             loadChats();
@@ -449,46 +417,44 @@ const HTML_PAGE = `<!DOCTYPE html>
         
         ws.onmessage = function(event) {
             try {
-                let data = JSON.parse(event.data);
-                if (data.type === "message") {
+                const data = JSON.parse(event.data);
+                if (data.type === 'message') {
                     if (currentChat === data.from) {
                         addMessage(data.from, data.text, false, data.file, data.fileName);
                     }
                     loadChats();
-                } else if (data.type === "private_message") {
+                } else if (data.type === 'private_message') {
                     if (currentChat === data.from) {
                         addMessage(data.from, data.text, false, data.file, data.fileName);
                     }
                     loadChats();
-                } else if (data.type === "user_list") {
-                    allUsers = data.users;
-                    updateOnlineCount();
+                } else if (data.type === 'user_list') {
+                    const others = data.users.filter(function(u) { return u !== currentUser; });
+                    onlineCountSpan.innerHTML = others.length + ' online';
                     loadChats();
-                } else if (data.type === "history") {
+                } else if (data.type === 'history') {
                     displayMessages(data.messages);
-                } else if (data.type === "chats_list") {
+                } else if (data.type === 'chats_list') {
                     displayChats(data.chats);
-                } else if (data.type === "system") {
+                } else if (data.type === 'system') {
                     addSystemMessage(data.text);
                 }
-            } catch(e) {
-                console.log("Parse error:", e);
-            }
+            } catch(e) {}
         };
         
         ws.onerror = function() {
-            document.getElementById("connStatus").innerHTML = "🔴 Error";
-            document.getElementById("connStatus").style.background = "#6b2e2e";
+            statusBar.innerHTML = '🔴 Connection error';
+            statusBar.style.background = '#6b2e2e';
         };
         
         ws.onclose = function() {
-            document.getElementById("connStatus").innerHTML = "🔴 Disconnected. Reconnecting...";
-            document.getElementById("connStatus").style.background = "#6b2e2e";
+            statusBar.innerHTML = '🔴 Disconnected. Reconnecting...';
+            statusBar.style.background = '#6b2e2e';
             if (pingInterval) clearInterval(pingInterval);
             if (reconnectAttempts < 15) {
                 setTimeout(function() {
                     reconnectAttempts++;
-                    connectWebSocket();
+                    connect();
                 }, 3000);
             }
         };
@@ -496,141 +462,121 @@ const HTML_PAGE = `<!DOCTYPE html>
     
     function loadChats() {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "get_chats" }));
+            ws.send(JSON.stringify({ type: 'get_chats' }));
         }
     }
     
     function displayChats(chats) {
-        let container = document.getElementById("chatsList");
-        if (!container) return;
-        
-        let html = "";
-        
+        if (!chatsList) return;
+        let html = '';
         for (let i = 0; i < chats.length; i++) {
-            let chat = chats[i];
-            let isActive = (currentChat === chat.username);
-            let preview = chat.last_message ? (chat.last_message.length > 30 ? chat.last_message.substring(0, 30) + "..." : chat.last_message) : "No messages yet";
-            let time = chat.last_time ? new Date(chat.last_time).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "";
-            
-            html += '<div class="chat-item ' + (isActive ? "active" : "") + '" onclick="selectChat(\'' + escapeHtml(chat.username) + '\')">';
-            html += '<div class="chat-name">' + escapeHtml(chat.username) + '</div>';
-            html += '<div class="chat-preview">' + escapeHtml(preview) + '</div>';
-            if (time) html += '<div class="chat-time">' + time + '</div>';
+            const chat = chats[i];
+            const isActive = (currentChat === chat.chat_user);
+            html += '<div class="chat-item' + (isActive ? ' active' : '') + '" onclick="selectChat(\'' + escapeHtml(chat.chat_user) + '\')">';
+            html += '<div class="chat-name">' + escapeHtml(chat.chat_user) + '</div>';
             html += '</div>';
         }
-        
-        if (html === "") {
-            html = '<div style="padding: 16px; color: #8e9eae; text-align: center;">No chats yet<br>Send a message to someone</div>';
+        if (html === '') {
+            html = '<div style="padding: 16px; color: #8e9eae; text-align: center;">No chats yet</div>';
         }
-        
-        container.innerHTML = html;
-        updateOnlineCount();
+        chatsList.innerHTML = html;
     }
     
     function selectChat(username) {
         if (username === currentUser) return;
         currentChat = username;
-        document.getElementById("chatTitle").innerHTML = "💬 Chat with " + escapeHtml(username);
-        document.getElementById("messagesList").innerHTML = "";
-        
+        chatTitle.innerHTML = '💬 Chat with ' + escapeHtml(username);
+        messagesList.innerHTML = '';
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "get_history", with: username }));
+            ws.send(JSON.stringify({ type: 'get_history', with: username }));
         }
-        
         loadChats();
     }
     
     function displayMessages(messages) {
-        let container = document.getElementById("messagesList");
-        container.innerHTML = "";
+        if (!messagesList) return;
+        messagesList.innerHTML = '';
         for (let i = 0; i < messages.length; i++) {
-            let msg = messages[i];
-            let text = msg.encrypted_message ? msg.encrypted_message : msg.text;
-            let isOwn = (msg.from_user === currentUser);
+            const msg = messages[i];
+            const isOwn = (msg.from_user === currentUser);
             if (msg.file_data) {
-                addMessageToContainer(container, msg.from_user, null, true, msg.file_data, msg.file_name, isOwn, msg.created_at);
+                addMessageToContainer(msg.from_user, null, true, msg.file_data, msg.file_name, isOwn, msg.created_at);
             } else {
-                addMessageToContainer(container, msg.from_user, text, false, null, null, isOwn, msg.created_at);
+                const displayText = msg.message ? (msg.message.includes(':') ? '🔒 Encrypted' : msg.message) : msg.message;
+                addMessageToContainer(msg.from_user, displayText, false, null, null, isOwn, msg.created_at);
             }
         }
-        container.scrollTop = container.scrollHeight;
+        messagesList.scrollTop = messagesList.scrollHeight;
     }
     
     function addMessage(user, text, isOwn, fileData, fileName) {
-        let container = document.getElementById("messagesList");
-        addMessageToContainer(container, user, text, false, fileData, fileName, isOwn, new Date());
-        container.scrollTop = container.scrollHeight;
+        addMessageToContainer(user, text, false, fileData, fileName, isOwn, new Date());
+        messagesList.scrollTop = messagesList.scrollHeight;
     }
     
-    function addMessageToContainer(container, user, text, isEncrypted, fileData, fileName, isOwn, timestamp) {
-        let div = document.createElement("div");
-        div.className = "message" + (isOwn ? " own" : "");
-        let time = new Date(timestamp).toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"});
+    function addMessageToContainer(user, text, isEncrypted, fileData, fileName, isOwn, timestamp) {
+        const div = document.createElement('div');
+        div.className = 'message' + (isOwn ? ' own' : '');
+        const time = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         
         if (fileData && fileName) {
-            let fileUrl = "data:application/octet-stream;base64," + fileData;
+            const fileUrl = 'data:application/octet-stream;base64,' + fileData;
             div.innerHTML = '<div class="message-name">' + escapeHtml(user) + '</div>' +
                 '<div class="message-file" onclick="downloadFile(\'' + fileUrl + '\', \'' + fileName + '\')">📎 ' + escapeHtml(fileName) + '</div>' +
                 '<div class="message-time">' + time + '</div>';
         } else {
-            let displayText = isEncrypted ? "🔒 Encrypted message" : text;
+            const displayText = isEncrypted ? '🔒 Encrypted' : (text || '');
             div.innerHTML = '<div class="message-name">' + escapeHtml(user) + '</div>' +
                 '<div class="message-bubble">' + escapeHtml(displayText) + '</div>' +
                 '<div class="message-time">' + time + '</div>';
         }
-        container.appendChild(div);
+        messagesList.appendChild(div);
+    }
+    
+    function addSystemMessage(text) {
+        const div = document.createElement('div');
+        div.className = 'message';
+        div.style.opacity = '0.7';
+        div.style.alignItems = 'center';
+        div.innerHTML = '<div class="message-bubble" style="background:#2b3b4c;font-size:12px;">' + escapeHtml(text) + '</div>';
+        messagesList.appendChild(div);
+        messagesList.scrollTop = messagesList.scrollHeight;
     }
     
     function downloadFile(url, name) {
-        let a = document.createElement("a");
+        const a = document.createElement('a');
         a.href = url;
         a.download = name;
         a.click();
     }
     
-    function addSystemMessage(text) {
-        let container = document.getElementById("messagesList");
-        let div = document.createElement("div");
-        div.className = "message";
-        div.style.opacity = "0.7";
-        div.style.alignItems = "center";
-        div.innerHTML = '<div class="message-bubble" style="background:#2b3b4c;font-size:12px;">' + escapeHtml(text) + '</div>';
-        container.appendChild(div);
-        container.scrollTop = container.scrollHeight;
-    }
-    
-    function updateOnlineCount() {
-        let count = allUsers.filter(u => u !== currentUser).length;
-        document.getElementById("onlineCount").innerHTML = count + " online";
-    }
-    
     function sendMessage() {
-        let text = document.getElementById("messageInput").value.trim();
+        const text = messageInput.value.trim();
         if (!text) return;
         if (!currentChat) {
-            addSystemMessage("Select a chat first");
+            addSystemMessage('Select a chat first');
             return;
         }
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "message", text: text, to: currentChat, private: true }));
-            document.getElementById("messageInput").value = "";
+            ws.send(JSON.stringify({ type: 'message', text: text, to: currentChat, private: true }));
+            messageInput.value = '';
             addMessage(currentUser, text, true, null, null);
         } else {
-            addSystemMessage("No connection");
+            addSystemMessage('No connection');
         }
     }
     
     function sendFile(file) {
         if (!file) return;
         if (!currentChat) {
-            addSystemMessage("Select a chat first");
+            addSystemMessage('Select a chat first');
             return;
         }
-        let reader = new FileReader();
+        const reader = new FileReader();
         reader.onload = function(e) {
-            let base64 = e.target.result.split(",")[1];
+            const base64 = e.target.result.split(',')[1];
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "file", fileName: file.name, fileType: file.type, fileData: base64, to: currentChat, private: true }));
+                ws.send(JSON.stringify({ type: 'file', fileName: file.name, fileType: file.type, fileData: base64, to: currentChat, private: true }));
                 addMessage(currentUser, null, true, base64, file.name);
             }
         };
@@ -638,25 +584,31 @@ const HTML_PAGE = `<!DOCTYPE html>
     }
     
     function handleKeyPress(e) {
-        if (e.key === "Enter") {
-            sendMessage();
-        }
+        if (e.key === 'Enter') sendMessage();
     }
     
     function escapeHtml(str) {
-        if (!str) return "";
+        if (!str) return '';
         return str.replace(/[&<>]/g, function(m) {
-            if (m === "&") return "&amp;";
-            if (m === "<") return "&lt;";
-            if (m === ">") return "&gt;";
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
             return m;
         });
     }
+    
+    // Event listeners
+    joinBtn.onclick = login;
+    sendBtn.onclick = sendMessage;
+    fileBtn.onclick = function() { fileInput.click(); };
+    fileInput.onchange = function(e) { if (e.target.files[0]) sendFile(e.target.files[0]); };
+    messageInput.onkeypress = handleKeyPress;
+    usernameInput.onkeypress = function(e) { if (e.key === 'Enter') login(); };
 </script>
 </body>
 </html>`;
 
-// ============== EXPRESS ==============
+// ============== HTTP ==============
 app.get('/', (req, res) => {
     res.send(HTML_PAGE);
 });
@@ -688,9 +640,9 @@ wss.on('connection', (ws, req) => {
     }
     
     activeUsers[currentUser] = { ws: ws, lastPing: Date.now() };
-    console.log(`✅ ${currentUser} connected`);
+    console.log('User connected: ' + currentUser);
     
-    ws.send(JSON.stringify({ type: 'system', text: `Welcome, ${currentUser}!` }));
+    ws.send(JSON.stringify({ type: 'system', text: 'Welcome, ' + currentUser + '!' }));
     broadcastUserList();
     
     pingInterval = setInterval(() => {
@@ -704,7 +656,7 @@ wss.on('connection', (ws, req) => {
             const message = JSON.parse(data);
             
             if (message.type === 'message' && message.text && message.to) {
-                let encryptedMsg = encrypt(message.text);
+                const encryptedMsg = encrypt(message.text);
                 await saveMessage(currentUser, message.to, encryptedMsg);
                 
                 if (activeUsers[message.to]) {
@@ -715,10 +667,10 @@ wss.on('connection', (ws, req) => {
                         timestamp: Date.now()
                     });
                 }
-                console.log(`📨 ${currentUser} -> ${message.to}: ${message.text}`);
+                console.log(currentUser + ' -> ' + message.to + ': ' + message.text);
                 
             } else if (message.type === 'file' && message.fileData && message.to) {
-                await saveMessage(currentUser, message.to, '', message.fileData, message.fileName, message.fileType);
+                await saveMessage(currentUser, message.to, '', message.fileData, message.fileName);
                 
                 if (activeUsers[message.to]) {
                     sendToUser(message.to, {
@@ -729,24 +681,15 @@ wss.on('connection', (ws, req) => {
                         timestamp: Date.now()
                     });
                 }
-                console.log(`📎 ${currentUser} -> ${message.to}: ${message.fileName}`);
+                console.log(currentUser + ' -> ' + message.to + ': [FILE] ' + message.fileName);
                 
             } else if (message.type === 'get_history' && message.with) {
-                let history = await getPrivateMessages(currentUser, message.with);
+                const history = await getMessages(currentUser, message.with);
                 ws.send(JSON.stringify({ type: 'history', messages: history }));
                 
             } else if (message.type === 'get_chats') {
-                let chats = await getAllChats(currentUser);
-                let chatList = [];
-                for (let chat of chats) {
-                    let lastMsg = await getPrivateMessages(currentUser, chat.chat_partner, 1);
-                    chatList.push({
-                        username: chat.chat_partner,
-                        last_message: lastMsg.length > 0 ? (lastMsg[0].encrypted_message ? '🔒 Encrypted' : lastMsg[0].text) : null,
-                        last_time: lastMsg.length > 0 ? lastMsg[0].created_at : null
-                    });
-                }
-                ws.send(JSON.stringify({ type: 'chats_list', chats: chatList }));
+                const chats = await getUserChats(currentUser);
+                ws.send(JSON.stringify({ type: 'chats_list', chats: chats }));
                 
             } else if (message.type === 'ping') {
                 if (activeUsers[currentUser]) {
@@ -759,7 +702,7 @@ wss.on('connection', (ws, req) => {
     });
     
     ws.on('close', () => {
-        console.log(`❌ ${currentUser} disconnected`);
+        console.log('User disconnected: ' + currentUser);
         if (pingInterval) clearInterval(pingInterval);
         if (currentUser && activeUsers[currentUser]) {
             delete activeUsers[currentUser];
@@ -770,7 +713,7 @@ wss.on('connection', (ws, req) => {
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-    console.log(`🎉 Server running on port ${PORT}`);
-    console.log(`🔒 Encryption enabled`);
-    console.log(`💾 Database: messenger.db`);
+    console.log('Server running on port ' + PORT);
+    console.log('Encryption enabled');
+    console.log('Database: messenger.db');
 });

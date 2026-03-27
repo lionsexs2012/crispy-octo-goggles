@@ -73,9 +73,7 @@ function getMessages(user1, user2) {
         db.all("SELECT * FROM messages WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?) ORDER BY created_at ASC", [user1, user2, user2, user1], (err, rows) => {
             if (err) reject(err);
             else {
-                rows.forEach(row => {
-                    row.message = decrypt(row.message);
-                });
+                rows.forEach(row => { row.message = decrypt(row.message); });
                 resolve(rows);
             }
         });
@@ -510,4 +508,6 @@ wss.on('connection', (ws, req) => {
 });
 
 const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => console.log('🚀 Server on port ' + PORT + ' | 🔒 Encrypted | 💾 SQLite'));
+server.listen(PORT, '0.0.0.0', () => {
+    console.log('Server running on port ' + PORT);
+});
